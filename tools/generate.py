@@ -207,6 +207,65 @@ def resolve_ligature(lig, merged_glyphnames, sources, next_free_codepoint):
     return next_free_codepoint(), label
 
 
+def build_font_glyph_index(sources, merged_glyphnames):
+    """Returns {ufo_glyph_name: {...}} for every glyph the spec defines:
+    base glyphs, stylistic alternates, and ligatures. Mirrors
+    generate_markdown's own resolution loop exactly (same shared allocator,
+    same per-range reset of the position/salt counters, same range
+    iteration order) so codepoints assigned here always agree with what's
+    already published in font-optional-codepoints.json and
+    mdbook/src/tables/*.md.
+
+    Common fields: "codepoint" (int), "name" (SMuFL semantic name, e.g.
+    "timeSig0Small"), "description" (prose), "category" ("base"|
+    "alternate"|"ligature"). Category-specific: alternates additionally
+    have "for" (base glyph's SMuFL name) and "set" (opentype stylistic-set
+    tag, or None for a plain salt alternate); ligatures additionally have
+    "components" (list of component glyphs' SMuFL names).
+
+    Consumers: tools/sync_ufo_glyphs.py (placeholder glyphs),
+    tools/generate_font.py (GDEF ligature classification),
+    tools/generate_font_metadata.py (Bravura.json)."""
+    allocate = make_codepoint_allocator(sources)
+    index = {}
+
+    for name, entry in merged_glyphnames.items():
+        index[f"uni{cp_int(entry['codepoint']):04X}"] = {
+            "codepoint": cp_int(entry["codepoint"]),
+            "name": name,
+            "description": entry["description"],
+            "category": "base",
+        }
+
+    for range_data in sources.ranges.values():
+        position_by_base = {}
+        salt_occurrence_by_base = {}
+        for alt in range_data.get("stylisticAlternates", []):
+            base_cp = sources.base_glyph_codepoint(alt["for"], merged_glyphnames)
+            alt_cp, label = resolve_alternate(
+                alt, base_cp, sources, allocate, position_by_base, salt_occurrence_by_base
+            )
+            index[label] = {
+                "codepoint": alt_cp,
+                "name": alt["name"],
+                "description": alt["description"],
+                "category": "alternate",
+                "for": alt["for"],
+                "set": sources.stylistic_sets.get(alt["set"]) if "set" in alt else None,
+            }
+        for lig in range_data.get("ligatures", []):
+            lig_cp, label = resolve_ligature(lig, merged_glyphnames, sources, allocate)
+            index[label] = {
+                "codepoint": lig_cp,
+                "name": lig["name"],
+                "description": lig["description"],
+                "category": "ligature",
+                "components": lig["components"],
+            }
+
+    return index
+
+
 def make_codepoint_allocator(sources):
     all_used = (
         [cp_int(e["codepoint"]) for e in sources.font_baseline["stylisticAlternates"]]
